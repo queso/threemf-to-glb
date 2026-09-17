@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.glb
+*.3mf
+*.tgz
+.DS_Store
