@@ -22,3 +22,6 @@ All notable changes to this project are documented in this file.
   two `Metadata` config files are ever decompressed, regardless of what else the archive contains.
 - Verified byte-identical output against the original script on synthetic fixtures and a real
   production reference file (with `{ generator: "print-farm threemf-to-glb POC" }`).
+- The CLI's entry-point guard compares real paths, so it runs when invoked through the
+  `node_modules/.bin` symlink npm installs (a plain path comparison made it a silent no-op there).
+  Covered by a test that lays out a consumer `node_modules` and runs the compiled CLI under node.

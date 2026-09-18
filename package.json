@@ -51,5 +51,13 @@
     "converter"
   ],
   "license": "MIT",
-  "author": "Josh Owens"
+  "author": "Josh Owens",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/queso/threemf-to-glb.git"
+  },
+  "homepage": "https://github.com/queso/threemf-to-glb#readme",
+  "bugs": {
+    "url": "https://github.com/queso/threemf-to-glb/issues"
+  }
 }
