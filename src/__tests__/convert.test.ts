@@ -3,6 +3,7 @@ import { convertThreemfToGlb } from "../convert.js"
 import { MissingModelError, NotAZipError, UnsupportedStructureError } from "../errors.js"
 import {
   buildMinimalFixture,
+  buildPartWithUuidFixture,
   buildTwoPlateFixture,
   notAZip,
   zipWithEmptyModel,
@@ -118,6 +119,19 @@ describe("convertThreemfToGlb — glTF conventions consumers rely on", () => {
     // BIN chunk length includes the 4-byte alignment pad; declared buffer length does not.
     expect(json.buffers[0].byteLength).toBeLessThanOrEqual(binByteLength)
     expect(binByteLength - json.buffers[0].byteLength).toBeLessThan(4)
+  })
+})
+
+describe("convertThreemfToGlb — parts with a uuid attribute", () => {
+  it("draws a painted normal part with its filaments, and only the negative part as negative", () => {
+    const { json } = parseGlb(convertThreemfToGlb(buildPartWithUuidFixture()))
+    const materialsOf = (mesh: TestGltfMesh) =>
+      mesh.primitives.map((p) => json.materials[p.material]?.name).sort()
+    // One mesh per component, in component order: the painted body, then the cutout.
+    const meshes = json.nodes
+      .filter((n) => n.mesh !== undefined)
+      .map((n) => json.meshes[n.mesh as number] as TestGltfMesh)
+    expect(meshes.map(materialsOf)).toEqual([["filament_1", "filament_2"], ["negative"]])
   })
 })
 

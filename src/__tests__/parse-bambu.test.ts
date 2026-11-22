@@ -3,6 +3,7 @@ import { MissingModelError, UnsupportedStructureError } from "../errors.js"
 import { parseBambuMetadata } from "../parse-bambu.js"
 import {
   buildMinimalFixture,
+  buildPartWithUuidFixture,
   buildTwoPlateFixture,
   notAZip,
   zipWithEmptyModel,
@@ -29,6 +30,15 @@ describe("parseBambuMetadata", () => {
       { path: "3D/Objects/geo1.model", objectId: "1", transform: null },
     ])
     expect(meta.componentsByObject["11"]?.[0]?.transform).toBe("1 0 0 0 1 0 0 0 1 10 0 0")
+  })
+
+  it("reads a <part> whose tag carries a uuid attribute, in document order", () => {
+    // Bambu Studio writes `<part id="1" subtype="normal_part" uuid="...">`.
+    const meta = parseBambuMetadata(buildPartWithUuidFixture())
+    expect(meta.partsByObject["30"]).toEqual([
+      { subtype: "normal_part", extruder: null },
+      { subtype: "negative_part", extruder: null },
+    ])
   })
 
   it("reads per-object base extruder", () => {

@@ -213,6 +213,84 @@ export function buildTwoPlateFixture(): Uint8Array {
   })
 }
 
+/**
+ * One object built from two parts, as Bambu Studio writes an object with a negative volume: a
+ * normal part whose `<part>` tag carries a `uuid` attribute (Bambu Studio writes one on normal
+ * parts), painted in filament states 1 and 2, and a negative part whose tag has no `uuid`. The
+ * two parts are two components of one root object, listed in the same order in
+ * model_settings.config.
+ */
+export function buildPartWithUuidFixture(): Uint8Array {
+  const geometry = objectModelXml([
+    {
+      id: "1",
+      vertices: [
+        [0, 0, 0],
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+      ],
+      triangles: [
+        [0, 1, 2, "4"], // state 1
+        [0, 1, 3, "8"], // state 2
+        [1, 2, 3, "8"], // state 2
+      ],
+    },
+    {
+      id: "2",
+      vertices: [
+        [0.2, 0.2, 0.2],
+        [0.4, 0.2, 0.2],
+        [0.2, 0.4, 0.2],
+      ],
+      triangles: [[0, 1, 2, null]],
+    },
+  ])
+  const root = `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" requiredextensions="p">
+ <resources>
+  <object id="30" type="model">
+    <components>
+      <component p:path="/3D/Objects/geo3.model" objectid="1"/>
+      <component p:path="/3D/Objects/geo3.model" objectid="2"/>
+    </components>
+  </object>
+ </resources>
+ <build>
+  <item objectid="30"/>
+ </build>
+</model>
+`
+  const modelSettings = `<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <object id="30">
+    <metadata key="name" value="fixture-30"/>
+    <metadata key="extruder" value="1"/>
+    <part id="1" subtype="normal_part" uuid="00000000-0000-4000-8000-000000000001">
+      <metadata key="name" value="fixture-30-body"/>
+    </part>
+    <part id="2" subtype="negative_part">
+      <metadata key="name" value="fixture-30-cutout"/>
+    </part>
+  </object>
+  <plate>
+    <metadata key="plater_id" value="1"/>
+    <model_instance>
+      <metadata key="object_id" value="30"/>
+    </model_instance>
+  </plate>
+</config>
+`
+  return zipSync({
+    "3D/3dmodel.model": enc.encode(root),
+    "3D/Objects/geo3.model": enc.encode(geometry),
+    "Metadata/model_settings.config": enc.encode(modelSettings),
+    "Metadata/project_settings.config": enc.encode(
+      projectSettingsJson(["#FF0000", "#00FF00", "#0000FF"]),
+    ),
+  })
+}
+
 /** A minimal single-plate, single-object, unpainted fixture with no filament colors at all. */
 export function buildMinimalFixture(): Uint8Array {
   const objectModel = objectModelXml([
