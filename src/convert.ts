@@ -295,7 +295,8 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
     const childIndices: number[] = []
     comps.forEach((comp, j) => {
       parseModelFile(comp.path)
-      const part = parts[j]
+      // The part whose id is the component's object id; by position when no part has that id.
+      const part = parts.find((p) => p.id === comp.objectId) ?? parts[j]
       const extruder = part?.extruder ?? extruderByObject[item.objectId] ?? 1
       const meshIdx = buildMesh(
         `${comp.path}#${comp.objectId}`,

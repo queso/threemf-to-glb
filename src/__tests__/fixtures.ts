@@ -291,6 +291,24 @@ export function buildPartWithUuidFixture(): Uint8Array {
   })
 }
 
+/**
+ * The same object as {@link buildPartWithUuidFixture}, but model_settings.config lists its parts
+ * in the other order from the root model's components: the negative part (id 2) first. A part
+ * belongs to the component whose object id equals the part's id, not to the component in the
+ * same position.
+ */
+export function buildPartsOutOfOrderFixture(): Uint8Array {
+  const files = unzipSync(buildPartWithUuidFixture())
+  const settings = new TextDecoder().decode(files["Metadata/model_settings.config"])
+  const normal = / {4}<part id="1"[\s\S]*?<\/part>\n/.exec(settings)?.[0] ?? ""
+  const negative = / {4}<part id="2"[\s\S]*?<\/part>\n/.exec(settings)?.[0] ?? ""
+  if (!normal || !negative) throw new Error("fixture: parts not found")
+  files["Metadata/model_settings.config"] = enc.encode(
+    settings.replace(normal + negative, negative + normal),
+  )
+  return zipSync(files)
+}
+
 /** A minimal single-plate, single-object, unpainted fixture with no filament colors at all. */
 export function buildMinimalFixture(): Uint8Array {
   const objectModel = objectModelXml([
