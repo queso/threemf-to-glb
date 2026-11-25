@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.2](https://github.com/queso/threemf-to-glb/compare/v0.1.1...v0.1.2) (2026-11-25)
+
+
+### Performance
+
+* read object model files one at a time, as bytes, so large projects fit in 512 MB ([#5](https://github.com/queso/threemf-to-glb/issues/5)) ([e082c71](https://github.com/queso/threemf-to-glb/commit/e082c71474780924cc498c5f790d379a96532ea7))
+
 ## [0.1.1](https://github.com/queso/threemf-to-glb/compare/v0.1.0...v0.1.1) (2026-11-25)
 
 
