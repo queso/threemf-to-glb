@@ -1,4 +1,4 @@
-import { dominantPaintState } from "./dominant-paint.js"
+import { cachedDominantPaintState, dominantPaintState } from "./dominant-paint.js"
 import { UnsupportedStructureError } from "./errors.js"
 import { parseBambuMetadataFromFiles } from "./parse-bambu.js"
 import { inflateOne, unzipSelective, ZipEntries } from "./zip.js"
@@ -97,6 +97,9 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
 
   const geomByRef = new Map<string, Geom>()
   const parsedPaths = new Set<string>()
+  // Paint strings repeat across triangles: cached for this conversion only.
+  const paintState = cachedDominantPaintState()
+
   // One buffer for every object geometry file, sized for the largest: each file is inflated into
   // it, scanned, and overwritten by the next.
   const zip = ZipEntries.open(input)
@@ -115,7 +118,7 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
         ? files[ROOT_MODEL]
         : ((zip ? zip.read(p, scratch) : inflateOne(input, p)) ?? undefined)
     if (!bytes) return
-    for (const section of scanModel(bytes)) {
+    for (const section of scanModel(bytes, paintState)) {
       if (section.tris.length) geomByRef.set(`${p}#${section.id}`, section)
     }
   }
@@ -521,7 +524,10 @@ export function decimal(b: Uint8Array, from: number, to: number): number {
 }
 
 /** The object sections of one model file, as the patterns above read them. */
-export function scanModel(b: Uint8Array): Section[] {
+export function scanModel(
+  b: Uint8Array,
+  paintState: (hex: string) => number = dominantPaintState,
+): Section[] {
   const starts: { id: string; start: number }[] = []
   for (let i = find(b, OBJECT, 0, b.length); i !== -1; i = find(b, OBJECT, i + 1, b.length)) {
     if (i + OBJECT.length < b.length && isWord(b[i + OBJECT.length])) continue
@@ -595,7 +601,7 @@ export function scanModel(b: Uint8Array): Section[] {
               let h1 = h0
               while (h1 < restTo && isHex(b[h1])) h1++
               if (h1 > h0 && b[h1] === QUOTE) {
-                state = dominantPaintState(text(b, h0, h1))
+                state = paintState(text(b, h0, h1))
                 hasPaint = true
                 break
               }

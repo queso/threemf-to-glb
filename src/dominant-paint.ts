@@ -1,7 +1,5 @@
 import { decodePaint, type PaintNode } from "./paint-rle.js"
 
-const dominantCache = new Map<string, number>()
-
 /**
  * Reduce one `paint_color` string to its area-dominant filament state: split children share
  * area equally, and the state covering the most area wins. State 0 = unpainted (extrudes the
@@ -9,9 +7,6 @@ const dominantCache = new Map<string, number>()
  * resolves to state 0 (unpainted) instead of throwing.
  */
 export function dominantPaintState(hex: string): number {
-  const cached = dominantCache.get(hex)
-  if (cached !== undefined) return cached
-
   const weights = new Map<number, number>()
   const walk = (n: PaintNode, w: number): void => {
     if (n.kind === "leaf") {
@@ -23,7 +18,6 @@ export function dominantPaintState(hex: string): number {
   try {
     walk(decodePaint(hex), 1)
   } catch {
-    dominantCache.set(hex, 0)
     return 0
   }
 
@@ -35,6 +29,22 @@ export function dominantPaintState(hex: string): number {
       bestW = w
     }
   }
-  dominantCache.set(hex, best)
   return best
+}
+
+/**
+ * {@link dominantPaintState} with a cache of its own. A model repeats a few paint strings over
+ * many triangles; the converter makes one per conversion, so a long-running process does not
+ * keep every paint string it has ever seen.
+ */
+export function cachedDominantPaintState(): (hex: string) => number {
+  const cache = new Map<string, number>()
+  return (hex) => {
+    let state = cache.get(hex)
+    if (state === undefined) {
+      state = dominantPaintState(hex)
+      cache.set(hex, state)
+    }
+    return state
+  }
 }
