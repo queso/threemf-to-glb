@@ -127,6 +127,9 @@ describe("decimal equals Number()", () => {
     "2883246525.9724236",
     "43972506073.902412",
     "19220276536306.630",
+    "9092492.191305169",
+    "998.5927883058597",
+    "9913889811.109569",
   ]
   it.each(cases)("%p", (s) => {
     const b = bytes(s)
@@ -137,21 +140,26 @@ describe("decimal equals Number()", () => {
     expect(Object.is(Math.fround(got), Math.fround(want)) || Number.isNaN(want)).toBe(true)
   })
 
-  it("random plain decimals of up to 15 significant digits", () => {
+  it("200,000 random decimals: signs, exponents, up to 17 significant digits", () => {
+    // A full-period 32-bit generator: every string comes from a different state.
     let seed = 7
     const rand = () => {
-      seed = (seed * 1103515245 + 12345) % 2147483648
-      return seed / 2147483648
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+      return seed / 4294967296
     }
-    for (let n = 0; n < 20000; n++) {
-      const intDigits = Math.floor(rand() * 7)
+    const digits = (k: number) => Array.from({ length: k }, () => Math.floor(rand() * 10)).join("")
+    const seen = new Set<string>()
+    for (let n = 0; n < 200_000; n++) {
+      const intDigits = Math.floor(rand() * 10)
       const fracDigits = Math.floor(rand() * 9)
-      const digits = (k: number) =>
-        Array.from({ length: k }, () => Math.floor(rand() * 10)).join("")
-      const s = `${rand() < 0.5 ? "-" : ""}${digits(intDigits) || "0"}${fracDigits ? `.${digits(fracDigits)}` : ""}`
+      const exponent = rand() < 0.3 ? `e${rand() < 0.5 ? "-" : ""}${Math.floor(rand() * 30)}` : ""
+      const s = `${rand() < 0.5 ? "-" : ""}${digits(intDigits) || "0"}${fracDigits ? `.${digits(fracDigits)}` : ""}${exponent}`
+      seen.add(s)
       const b = bytes(s)
       expect(Object.is(decimal(b, 0, b.length), Number(s)), s).toBe(true)
     }
+    // Short strings ("0", "-3") repeat by chance; a generator that cycled would give a few thousand.
+    expect(seen.size).toBeGreaterThan(180_000)
   })
 })
 
@@ -163,7 +171,7 @@ describe("ZipEntries", () => {
     })
     const entries = ZipEntries.open(zip)
     if (!entries) throw new Error("not read")
-    const scratch = new Uint8Array(5000)
+    const scratch = new Uint8Array(5001) // the entry, and one byte to spare
     const all = unzipSync(zip)
     const a = entries.read("a.model", scratch)
     expect(new TextDecoder().decode(a ?? undefined)).toBe(new TextDecoder().decode(all["a.model"]))

@@ -50,6 +50,14 @@ export class ZipEntries {
   ) {}
 
   static open(input: Uint8Array): ZipEntries | null {
+    try {
+      return ZipEntries.parse(input)
+    } catch {
+      return null
+    }
+  }
+
+  private static parse(input: Uint8Array): ZipEntries | null {
     const v = new DataView(input.buffer, input.byteOffset, input.byteLength)
     let eocd = -1
     for (let i = input.length - 22; i >= Math.max(0, input.length - 22 - 65535); i--) {
@@ -86,19 +94,30 @@ export class ZipEntries {
   }
 
   /**
-   * Entry `name`'s bytes, written into `scratch` when it is deflated (and big enough). The result
+   * Entry `name`'s bytes, or null when this reader does not read it exactly: an entry it does not
+   * have, a damaged local header, a compression other than stored or deflate, data that does not
+   * inflate, or a size other than the declared one. The caller then lets fflate decide. A
+   * deflated entry is written into `scratch` when it fits (with one byte to spare); the result
    * may share `scratch` or the input: read it before the next call.
    */
   read(name: string, scratch: Uint8Array): Uint8Array | null {
     const e = this.entries.get(name.replace(/^\//, ""))
     if (!e) return null
-    const v = new DataView(this.input.buffer, this.input.byteOffset, this.input.byteLength)
-    if (v.getUint32(e.local, true) !== 0x04034b50) return null
-    const start = e.local + 30 + v.getUint16(e.local + 26, true) + v.getUint16(e.local + 28, true)
-    const data = this.input.subarray(start, start + e.csize)
-    if (e.method === 0) return data
-    if (e.method !== 8) return null
-    const out = e.usize <= scratch.length ? scratch.subarray(0, e.usize) : new Uint8Array(e.usize)
-    return inflateSync(data, { out })
+    try {
+      const v = new DataView(this.input.buffer, this.input.byteOffset, this.input.byteLength)
+      if (e.local + 30 > this.input.length || v.getUint32(e.local, true) !== 0x04034b50) return null
+      const start = e.local + 30 + v.getUint16(e.local + 26, true) + v.getUint16(e.local + 28, true)
+      if (start + e.csize > this.input.length) return null
+      const data = this.input.subarray(start, start + e.csize)
+      if (e.method === 0) return data.length === e.usize ? data : null
+      if (e.method !== 8) return null
+      // One byte more than declared, so an entry that inflates to more than it says is caught.
+      const room = e.usize + 1
+      const out = room <= scratch.length ? scratch.subarray(0, room) : new Uint8Array(room)
+      const inflated = inflateSync(data, { out })
+      return inflated.length === e.usize ? inflated : null
+    } catch {
+      return null
+    }
   }
 }

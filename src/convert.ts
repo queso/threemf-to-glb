@@ -77,12 +77,27 @@ type GltfJson = {
  * configs. A sliced `.gcode.3mf` also carries plate gcode (hundreds of MB decompressed) and
  * thumbnails; inflating those too is what OOM-killed a 512Mi pod on a 58MB input in production.
  */
+/**
+ * What the last conversion held, for this package's tests (not exported from the package): the
+ * most object geometries held at once, and how many paint strings its paint cache saw.
+ */
+export const streamingStats = {
+  mostGeometriesHeld: 0,
+  paintStrings: 0,
+  /** The entries inflated before any geometry is read. */
+  upFront: [] as string[],
+}
+
 export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions = {}): Uint8Array {
+  streamingStats.mostGeometriesHeld = 0
+  streamingStats.paintStrings = 0
+  streamingStats.upFront = []
   const generator = options.generator ?? DEFAULT_GENERATOR
 
   // The root model and the two configs only. Each object geometry file is inflated when it is
   // first needed, parsed, and dropped before the next one (parseModelFile).
   const files = unzipSelective(input, (name) => name === ROOT_MODEL || NEEDED_METADATA.has(name))
+  streamingStats.upFront = Object.keys(files).sort()
   const meta = parseBambuMetadataFromFiles(files)
   const {
     filamentColors,
@@ -107,20 +122,28 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
   if (zip) {
     let largest = 0
     for (const [name, e] of zip.entries)
-      if (name.endsWith(".model")) largest = Math.max(largest, e.usize)
-    scratch = new Uint8Array(largest)
+      if (name !== ROOT_MODEL && name.endsWith(".model")) largest = Math.max(largest, e.usize)
+    // One byte to spare: the reader inflates one past the declared size to catch a longer entry.
+    scratch = new Uint8Array(largest + 1)
   }
   function parseModelFile(p: string): void {
     if (parsedPaths.has(p)) return
     parsedPaths.add(p)
+    const key = p.replace(/^\//, "")
+    // Only model files are geometry, as the selective inflate always held.
+    if (!key.endsWith(".model")) return
+    // The reader answers null for anything it does not read exactly (a damaged header, another
+    // compression, a size that does not match); fflate then decides, as it did before streaming:
+    // it inflates the entry or throws NotAZipError.
     const bytes =
-      p.replace(/^\//, "") === ROOT_MODEL
+      key === ROOT_MODEL
         ? files[ROOT_MODEL]
-        : ((zip ? zip.read(p, scratch) : inflateOne(input, p)) ?? undefined)
+        : (zip?.read(key, scratch) ?? inflateOne(input, key) ?? undefined)
     if (!bytes) return
     for (const section of scanModel(bytes, paintState)) {
       if (section.tris.length) geomByRef.set(`${p}#${section.id}`, section)
     }
+    streamingStats.mostGeometriesHeld = Math.max(streamingStats.mostGeometriesHeld, geomByRef.size)
   }
 
   const srgbToLinear = (c: number): number => {
@@ -328,8 +351,14 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
     const childIndices: number[] = []
     comps.forEach((comp, j) => {
       parseModelFile(comp.path)
-      // The part whose id is the component's object id; by position when no part has that id.
-      const part = parts.find((p) => p.id === comp.objectId) ?? parts[j]
+      // The part at the component's position when its id is the component's object id, as Bambu
+      // Studio's importer pairs them (a shared mesh repeats both); otherwise the part with that id;
+      // otherwise the one at the same position.
+      const positional = parts[j]
+      const part =
+        positional?.id === comp.objectId
+          ? positional
+          : (parts.find((p) => p.id === comp.objectId) ?? positional)
       const extruder = part?.extruder ?? extruderByObject[item.objectId] ?? 1
       const ref = `${comp.path}#${comp.objectId}`
       const meshIdx = buildMesh(ref, extruder, part?.subtype === "negative_part")
@@ -374,6 +403,7 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
     buffers: [{ byteLength: binLength }],
   }
 
+  streamingStats.paintStrings = paintState.size
   return assembleGlb(gltf, binParts, binLength)
 }
 
@@ -459,12 +489,29 @@ const isWord = (c: number) =>
 const isDigit = (c: number) => c >= 0x30 && c <= 0x39
 const isHex = (c: number) => isDigit(c) || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66)
 
+/**
+ * The first `pat` that starts and ends within b[from, to), or -1. For the tag patterns, which
+ * start with "<": that byte recurs every few bytes, so `indexOf` never runs far past `to`.
+ */
 function find(b: Uint8Array, pat: Uint8Array, from: number, to: number): number {
-  for (
-    let i = b.indexOf(pat[0], from);
-    i !== -1 && i + pat.length <= to;
-    i = b.indexOf(pat[0], i + 1)
-  ) {
+  const last = to - pat.length
+  for (let i = b.indexOf(pat[0], from); i !== -1 && i <= last; i = b.indexOf(pat[0], i + 1)) {
+    let k = 1
+    while (k < pat.length && b[i + k] === pat[k]) k++
+    if (k === pat.length) return i
+  }
+  return -1
+}
+
+/**
+ * `find` for a short range, such as the rest of one tag, read byte by byte: a pattern whose first
+ * byte may not occur for megabytes (paint_color's "p" in an unpainted object) must not send
+ * `indexOf` to the end of the file once per triangle.
+ */
+function findWithin(b: Uint8Array, pat: Uint8Array, from: number, to: number): number {
+  const last = to - pat.length
+  for (let i = from; i <= last; i++) {
+    if (b[i] !== pat[0]) continue
     let k = 1
     while (k < pat.length && b[i + k] === pat[k]) k++
     if (k === pat.length) return i
@@ -475,8 +522,9 @@ const at = (b: Uint8Array, pat: Uint8Array, i: number) => {
   for (let k = 0; k < pat.length; k++) if (b[i + k] !== pat[k]) return false
   return true
 }
-const text = (b: Uint8Array, from: number, to: number) =>
-  String.fromCharCode.apply(null, b.subarray(from, to) as unknown as number[])
+// UTF-8, as the whole file was decoded before streaming, and with no argument-count limit.
+const utf8 = new TextDecoder("utf-8", { ignoreBOM: true })
+const text = (b: Uint8Array, from: number, to: number) => utf8.decode(b.subarray(from, to))
 
 const POW10 = Array.from({ length: 23 }, (_, k) => 10 ** k)
 
@@ -529,21 +577,29 @@ export function scanModel(
   paintState: (hex: string) => number = dominantPaintState,
 ): Section[] {
   const starts: { id: string; start: number }[] = []
-  for (let i = find(b, OBJECT, 0, b.length); i !== -1; i = find(b, OBJECT, i + 1, b.length)) {
-    if (i + OBJECT.length < b.length && isWord(b[i + OBJECT.length])) continue
-    // [^>]* is greedy: the tag's last \bid="digits" before its first ">".
-    const close = b.indexOf(GT, i)
-    const end = close === -1 ? b.length : close
-    let id: string | null = null
-    for (let k = i + OBJECT.length; k + 4 <= end; k++) {
-      if (b[k] !== 0x69 || b[k + 1] !== 0x64 || b[k + 2] !== 0x3d || b[k + 3] !== QUOTE) continue
-      if (isWord(b[k - 1])) continue
-      let d = k + 4
-      while (d < b.length && isDigit(b[d])) d++
-      if (d > k + 4 && b[d] === QUOTE) id = text(b, k + 4, d)
+  for (let i = find(b, OBJECT, 0, b.length); i !== -1; ) {
+    // Where the next search starts: after this match, as a global regex resumes; one byte on
+    // when there is no match here.
+    let next = i + 1
+    if (!(i + OBJECT.length < b.length && isWord(b[i + OBJECT.length]))) {
+      // [^>]* is greedy: the tag's last \bid="digits" before its first ">".
+      const close = b.indexOf(GT, i)
+      const end = close === -1 ? b.length : close
+      let id: string | null = null
+      for (let k = i + OBJECT.length; k + 4 <= end; k++) {
+        if (b[k] !== 0x69 || b[k + 1] !== 0x64 || b[k + 2] !== 0x3d || b[k + 3] !== QUOTE) continue
+        if (isWord(b[k - 1])) continue
+        let d = k + 4
+        while (d < b.length && isDigit(b[d])) d++
+        if (d > k + 4 && b[d] === QUOTE) {
+          id = text(b, k + 4, d)
+          next = d + 1
+        }
+      }
+      // A second "<object" inside this tag is part of the match, as [^>]* takes it.
+      if (id !== null) starts.push({ id, start: i })
     }
-    // The regex can match past this tag's ">" only if [^>]* could; it cannot.
-    if (id !== null) starts.push({ id, start: i })
+    i = find(b, OBJECT, next, b.length)
   }
   const sections: Section[] = []
   for (let s = 0; s < starts.length; s++) {
@@ -577,7 +633,9 @@ export function scanModel(
       let v = 0
       let k = from
       while (k < to && isDigit(b[k])) v = v * 10 + (b[k++] - 0x30)
-      return k > from ? [v, k] : null
+      if (k === from) return null
+      // Past 15 digits the sum above can round away from Number()'s value.
+      return [k - from > 15 ? Number(text(b, from, k)) : v, k]
     }
     for (let i = find(b, TRIANGLE, from, to); i !== -1; ) {
       let next = i + 1
@@ -593,9 +651,9 @@ export function scanModel(
             let state = 0
             let hasPaint = false
             for (
-              let q = find(b, PAINT, restFrom, restTo);
+              let q = findWithin(b, PAINT, restFrom, restTo);
               q !== -1;
-              q = find(b, PAINT, q + 1, restTo)
+              q = findWithin(b, PAINT, q + 1, restTo)
             ) {
               const h0 = q + PAINT.length
               let h1 = h0

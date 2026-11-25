@@ -37,14 +37,17 @@ export function dominantPaintState(hex: string): number {
  * many triangles; the converter makes one per conversion, so a long-running process does not
  * keep every paint string it has ever seen.
  */
-export function cachedDominantPaintState(): (hex: string) => number {
+export function cachedDominantPaintState(): ((hex: string) => number) & { readonly size: number } {
   const cache = new Map<string, number>()
-  return (hex) => {
+  const lookup = (hex: string) => {
     let state = cache.get(hex)
     if (state === undefined) {
       state = dominantPaintState(hex)
       cache.set(hex, state)
     }
     return state
+  }
+  return Object.defineProperty(lookup, "size", { get: () => cache.size }) as typeof lookup & {
+    readonly size: number
   }
 }
