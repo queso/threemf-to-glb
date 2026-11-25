@@ -1,6 +1,7 @@
 import { dominantPaintState } from "./dominant-paint.js"
+import { UnsupportedStructureError } from "./errors.js"
 import { parseBambuMetadataFromFiles } from "./parse-bambu.js"
-import { readText, unzipSelective } from "./zip.js"
+import { inflateOne, unzipSelective, ZipEntries } from "./zip.js"
 
 export type ConvertOptions = {
   /**
@@ -16,8 +17,13 @@ const NEEDED_METADATA = new Set([
   "Metadata/project_settings.config",
 ])
 const DEFAULT_GENERATOR = "threemf-to-glb"
+const ROOT_MODEL = "3D/3dmodel.model"
 
-type Geom = { pos: Float32Array; tris: Uint32Array; paint: (string | null)[] | null }
+/**
+ * One object's geometry. `states` holds each triangle's dominant paint state (0 = unpainted),
+ * or is null when no triangle is painted: the paint strings are reduced as they are read.
+ */
+type Geom = { pos: Float32Array; tris: Uint32Array; states: Uint8Array | null }
 
 type MaterialJson = {
   name: string
@@ -74,10 +80,9 @@ type GltfJson = {
 export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions = {}): Uint8Array {
   const generator = options.generator ?? DEFAULT_GENERATOR
 
-  const files = unzipSelective(
-    input,
-    (name) => name.endsWith(".model") || NEEDED_METADATA.has(name),
-  )
+  // The root model and the two configs only. Each object geometry file is inflated when it is
+  // first needed, parsed, and dropped before the next one (parseModelFile).
+  const files = unzipSelective(input, (name) => name === ROOT_MODEL || NEEDED_METADATA.has(name))
   const meta = parseBambuMetadataFromFiles(files)
   const {
     filamentColors,
@@ -92,37 +97,26 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
 
   const geomByRef = new Map<string, Geom>()
   const parsedPaths = new Set<string>()
+  // One buffer for every object geometry file, sized for the largest: each file is inflated into
+  // it, scanned, and overwritten by the next.
+  const zip = ZipEntries.open(input)
+  let scratch: Uint8Array = new Uint8Array(0)
+  if (zip) {
+    let largest = 0
+    for (const [name, e] of zip.entries)
+      if (name.endsWith(".model")) largest = Math.max(largest, e.usize)
+    scratch = new Uint8Array(largest)
+  }
   function parseModelFile(p: string): void {
     if (parsedPaths.has(p)) return
     parsedPaths.add(p)
-    const xml = readText(files, p)
-    if (!xml) return
-    const sections = [...xml.matchAll(/<object\b[^>]*\bid="(\d+)"/g)].map((m) => ({
-      id: m[1],
-      start: m.index,
-    }))
-    for (let i = 0; i < sections.length; i++) {
-      const chunk = xml.slice(sections[i].start, sections[i + 1]?.start ?? xml.length)
-      const pos: number[] = []
-      for (const vm of chunk.matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"/g)) {
-        pos.push(Number(vm[1]), Number(vm[2]), Number(vm[3]))
-      }
-      const tris: number[] = []
-      const paint: (string | null)[] = []
-      let painted = false
-      for (const tm of chunk.matchAll(/<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"([^>]*)/g)) {
-        tris.push(Number(tm[1]), Number(tm[2]), Number(tm[3]))
-        const pc = /paint_color="([0-9A-Fa-f]+)"/.exec(tm[4])
-        paint.push(pc ? pc[1] : null)
-        if (pc) painted = true
-      }
-      if (tris.length) {
-        geomByRef.set(`${p}#${sections[i].id}`, {
-          pos: Float32Array.from(pos),
-          tris: Uint32Array.from(tris),
-          paint: painted ? paint : null,
-        })
-      }
+    const bytes =
+      p.replace(/^\//, "") === ROOT_MODEL
+        ? files[ROOT_MODEL]
+        : ((zip ? zip.read(p, scratch) : inflateOne(input, p)) ?? undefined)
+    if (!bytes) return
+    for (const section of scanModel(bytes)) {
+      if (section.tris.length) geomByRef.set(`${p}#${section.id}`, section)
     }
   }
 
@@ -231,6 +225,33 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
     return idx
   }
 
+  /**
+   * A geometry's triangles split by paint state, in the order each state first appears, as the
+   * primitives list them. Shared by every mesh of that geometry (one per base extruder).
+   */
+  const bucketsByRef = new Map<string, [number, Uint32Array][]>()
+  function buckets(ref: string, geom: Geom): [number, Uint32Array][] {
+    const cached = bucketsByRef.get(ref)
+    if (cached) return cached
+    const triCount = geom.tris.length / 3
+    const counts = new Map<number, number>()
+    for (let t = 0; t < triCount; t++) {
+      const state = geom.states?.[t] ?? 0
+      counts.set(state, (counts.get(state) ?? 0) + 1)
+    }
+    const out = new Map<number, { arr: Uint32Array; at: number }>()
+    for (const [state, n] of counts) out.set(state, { arr: new Uint32Array(n * 3), at: 0 })
+    for (let t = 0; t < triCount; t++) {
+      const b = out.get(geom.states?.[t] ?? 0) as { arr: Uint32Array; at: number }
+      b.arr[b.at++] = geom.tris[t * 3]
+      b.arr[b.at++] = geom.tris[t * 3 + 1]
+      b.arr[b.at++] = geom.tris[t * 3 + 2]
+    }
+    const list = [...out].map(([state, b]) => [state, b.arr] as [number, Uint32Array])
+    bucketsByRef.set(ref, list)
+    return list
+  }
+
   function buildMesh(ref: string, extruder: number, negative: boolean): number | null {
     const key = `${ref}#${extruder}#${negative ? 1 : 0}`
     const cached = gltfMeshes.get(key)
@@ -239,25 +260,16 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
     if (!geom) return null
 
     const posAcc = positionAccessor(ref, geom)
-    const triCount = geom.tris.length / 3
-
-    // bucket triangles by filament state (0 = the part's base extruder)
-    const byState = new Map<number, number[]>()
-    for (let t = 0; t < triCount; t++) {
-      const hex = negative ? null : geom.paint?.[t]
-      const state = hex ? dominantPaintState(hex) : 0
-      let arr = byState.get(state)
-      if (!arr) {
-        arr = []
-        byState.set(state, arr)
-      }
-      arr.push(geom.tris[t * 3], geom.tris[t * 3 + 1], geom.tris[t * 3 + 2])
-    }
+    // A negative part is one primitive of every triangle in order; otherwise one per filament
+    // state (0 = the part's base extruder).
+    const parts: [number, Uint32Array][] = negative ? [[0, geom.tris]] : buckets(ref, geom)
 
     const primitives: PrimitiveJson[] = []
-    for (const [state, idxArr] of byState) {
-      const indices = Uint32Array.from(idxArr)
-      const idxView = addBufferView(new Uint8Array(indices.buffer), 34963)
+    for (const [state, indices] of parts) {
+      const idxView = addBufferView(
+        new Uint8Array(indices.buffer, indices.byteOffset, indices.byteLength),
+        34963,
+      )
       accessors.push({
         bufferView: idxView,
         componentType: 5125,
@@ -285,6 +297,24 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
     return [v[0], v[1], v[2], 0, v[3], v[4], v[5], 0, v[6], v[7], v[8], 0, v[9], v[10], v[11], 1]
   }
 
+  // How many meshes each geometry still has to build: after its last, its triangles and paint
+  // states are dropped (the GLB keeps the positions and the per-state index arrays).
+  const usesLeft = new Map<string, number>()
+  for (const item of buildItems) {
+    const comps = componentsByObject[item.objectId] ?? [
+      { path: "3D/3dmodel.model", objectId: item.objectId, transform: null },
+    ]
+    for (const comp of comps) {
+      const ref = `${comp.path}#${comp.objectId}`
+      usesLeft.set(ref, (usesLeft.get(ref) ?? 0) + 1)
+    }
+  }
+  const used = (ref: string) => {
+    const left = (usesLeft.get(ref) ?? 1) - 1
+    usesLeft.set(ref, left)
+    if (left === 0) geomByRef.delete(ref)
+  }
+
   const nodes: NodeJson[] = []
   const itemNodeIndices: number[] = []
   for (const item of buildItems) {
@@ -298,11 +328,9 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
       // The part whose id is the component's object id; by position when no part has that id.
       const part = parts.find((p) => p.id === comp.objectId) ?? parts[j]
       const extruder = part?.extruder ?? extruderByObject[item.objectId] ?? 1
-      const meshIdx = buildMesh(
-        `${comp.path}#${comp.objectId}`,
-        extruder,
-        part?.subtype === "negative_part",
-      )
+      const ref = `${comp.path}#${comp.objectId}`
+      const meshIdx = buildMesh(ref, extruder, part?.subtype === "negative_part")
+      used(ref)
       if (meshIdx === null) return
       const node: NodeJson = { mesh: meshIdx }
       const m = to3mfMatrix(comp.transform)
@@ -321,6 +349,8 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
     nodes.push(itemNode)
     itemNodeIndices.push(nodes.length - 1)
   }
+
+  scratch = new Uint8Array(0)
 
   // Z-up (3MF) -> Y-up (glTF)
   nodes.push({
@@ -375,4 +405,220 @@ function assembleGlb(gltf: GltfJson, binParts: Uint8Array[], binLength: number):
     off += part.byteLength
   }
   return glb
+}
+
+// ---------- the model XML, scanned as bytes ----------
+// The object geometry files are tens of MB each. Scanning their bytes, with only the short number
+// and paint fields turned into strings, keeps a file's whole text and its regex matches out of
+// memory. The scanner accepts what these patterns accept, and nothing else:
+//   objects:    <object\b[^>]*\bid="(\d+)"          (the last id in the tag)
+//   vertices:   <vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"
+//   triangles:  <triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"([^>]*)
+//   paint:      paint_color="([0-9A-Fa-f]+)"  (the first in the rest of the tag)
+
+/** A typed array that grows by doubling, so a large mesh is never held as JS numbers. */
+class Grow<T extends Float32Array | Uint32Array | Uint8Array> {
+  private buf: T
+  length = 0
+  constructor(private readonly make: (n: number) => T) {
+    this.buf = make(1024)
+  }
+  push(v: number): void {
+    if (this.length === this.buf.length) {
+      const next = this.make(this.buf.length * 2)
+      next.set(this.buf)
+      this.buf = next
+    }
+    this.buf[this.length++] = v
+  }
+  /** The filled part, copied to an array of its own length. */
+  done(): T {
+    return this.buf.slice(0, this.length) as T
+  }
+}
+
+type Section = Geom & { id: string }
+
+const ascii = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0))
+const OBJECT = ascii("<object")
+const VERTEX = ascii('<vertex x="')
+const TRIANGLE = ascii('<triangle v1="')
+const Y = ascii('" y="')
+const Z = ascii('" z="')
+const V2 = ascii('" v2="')
+const V3 = ascii('" v3="')
+const PAINT = ascii('paint_color="')
+const QUOTE = 0x22
+const GT = 0x3e
+
+const isWord = (c: number) =>
+  (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) || c === 0x5f
+const isDigit = (c: number) => c >= 0x30 && c <= 0x39
+const isHex = (c: number) => isDigit(c) || (c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66)
+
+function find(b: Uint8Array, pat: Uint8Array, from: number, to: number): number {
+  for (
+    let i = b.indexOf(pat[0], from);
+    i !== -1 && i + pat.length <= to;
+    i = b.indexOf(pat[0], i + 1)
+  ) {
+    let k = 1
+    while (k < pat.length && b[i + k] === pat[k]) k++
+    if (k === pat.length) return i
+  }
+  return -1
+}
+const at = (b: Uint8Array, pat: Uint8Array, i: number) => {
+  for (let k = 0; k < pat.length; k++) if (b[i + k] !== pat[k]) return false
+  return true
+}
+const text = (b: Uint8Array, from: number, to: number) =>
+  String.fromCharCode.apply(null, b.subarray(from, to) as unknown as number[])
+
+const POW10 = Array.from({ length: 23 }, (_, k) => 10 ** k)
+
+/**
+ * The number in b[from, to), equal to `Number()` of its text. A plain decimal ([-]digits[.digits]
+ * [e[-+]digits]) with at most 15 significant digits and a power of ten within 10^±22 is one
+ * exactly-representable mantissa times or over one exact power of ten, a single correctly rounded
+ * operation, as `Number()` is. Anything else goes through `Number()`.
+ */
+function decimal(b: Uint8Array, from: number, to: number): number {
+  let i = from
+  const negative = b[i] === 0x2d
+  if (negative) i++
+  let m = 0
+  let digits = 0
+  let scale = 0
+  let any = false
+  while (i < to && isDigit(b[i])) {
+    if (m !== 0 || b[i] !== 0x30) digits++
+    m = m * 10 + (b[i++] - 0x30)
+    any = true
+  }
+  if (i < to && b[i] === 0x2e) {
+    i++
+    while (i < to && isDigit(b[i])) {
+      if (m !== 0 || b[i] !== 0x30) digits++
+      m = m * 10 + (b[i++] - 0x30)
+      scale--
+      any = true
+    }
+  }
+  if (any && i < to && (b[i] === 0x65 || b[i] === 0x45)) {
+    i++
+    const expNegative = b[i] === 0x2d
+    if (b[i] === 0x2d || b[i] === 0x2b) i++
+    let e = 0
+    const e0 = i
+    while (i < to && isDigit(b[i]) && e < 1000) e = e * 10 + (b[i++] - 0x30)
+    if (i === e0) return Number(text(b, from, to))
+    scale += expNegative ? -e : e
+  }
+  if (!any || i !== to || digits > 15 || scale > 22 || scale < -22) return Number(text(b, from, to))
+  const v = scale >= 0 ? m * POW10[scale] : m / POW10[-scale]
+  return negative ? -v : v
+}
+
+/** The object sections of one model file, as the patterns above read them. */
+export function scanModel(b: Uint8Array): Section[] {
+  const starts: { id: string; start: number }[] = []
+  for (let i = find(b, OBJECT, 0, b.length); i !== -1; i = find(b, OBJECT, i + 1, b.length)) {
+    if (i + OBJECT.length < b.length && isWord(b[i + OBJECT.length])) continue
+    // [^>]* is greedy: the tag's last \bid="digits" before its first ">".
+    const close = b.indexOf(GT, i)
+    const end = close === -1 ? b.length : close
+    let id: string | null = null
+    for (let k = i + OBJECT.length; k + 4 <= end; k++) {
+      if (b[k] !== 0x69 || b[k + 1] !== 0x64 || b[k + 2] !== 0x3d || b[k + 3] !== QUOTE) continue
+      if (isWord(b[k - 1])) continue
+      let d = k + 4
+      while (d < b.length && isDigit(b[d])) d++
+      if (d > k + 4 && b[d] === QUOTE) id = text(b, k + 4, d)
+    }
+    // The regex can match past this tag's ">" only if [^>]* could; it cannot.
+    if (id !== null) starts.push({ id, start: i })
+  }
+  const sections: Section[] = []
+  for (let s = 0; s < starts.length; s++) {
+    const from = starts[s].start
+    const to = starts[s + 1]?.start ?? b.length
+    const pos = new Grow((n) => new Float32Array(n))
+    for (let i = find(b, VERTEX, from, to); i !== -1; ) {
+      let next = i + 1
+      const x0 = i + VERTEX.length
+      const x1 = b.indexOf(QUOTE, x0)
+      if (x1 > x0 && x1 < to && at(b, Y, x1)) {
+        const y0 = x1 + Y.length
+        const y1 = b.indexOf(QUOTE, y0)
+        if (y1 > y0 && y1 < to && at(b, Z, y1)) {
+          const z0 = y1 + Z.length
+          const z1 = b.indexOf(QUOTE, z0)
+          if (z1 > z0 && z1 < to) {
+            pos.push(decimal(b, x0, x1))
+            pos.push(decimal(b, y0, y1))
+            pos.push(decimal(b, z0, z1))
+            next = z1 + 1
+          }
+        }
+      }
+      i = find(b, VERTEX, next, to)
+    }
+    const tris = new Grow((n) => new Uint32Array(n))
+    const states = new Grow((n) => new Uint8Array(n))
+    let painted = false
+    const int = (from: number): [number, number] | null => {
+      let v = 0
+      let k = from
+      while (k < to && isDigit(b[k])) v = v * 10 + (b[k++] - 0x30)
+      return k > from ? [v, k] : null
+    }
+    for (let i = find(b, TRIANGLE, from, to); i !== -1; ) {
+      let next = i + 1
+      const a = int(i + TRIANGLE.length)
+      if (a && at(b, V2, a[1])) {
+        const c = int(a[1] + V2.length)
+        if (c && at(b, V3, c[1])) {
+          const d = int(c[1] + V3.length)
+          if (d && b[d[1]] === QUOTE) {
+            const restFrom = d[1] + 1
+            let restTo = b.indexOf(GT, restFrom)
+            if (restTo === -1 || restTo > to) restTo = to
+            let state = 0
+            let hasPaint = false
+            for (
+              let q = find(b, PAINT, restFrom, restTo);
+              q !== -1;
+              q = find(b, PAINT, q + 1, restTo)
+            ) {
+              const h0 = q + PAINT.length
+              let h1 = h0
+              while (h1 < restTo && isHex(b[h1])) h1++
+              if (h1 > h0 && b[h1] === QUOTE) {
+                state = dominantPaintState(text(b, h0, h1))
+                hasPaint = true
+                break
+              }
+            }
+            if (state > 255)
+              throw new UnsupportedStructureError(`paint state ${state} out of range`)
+            tris.push(a[0])
+            tris.push(c[0])
+            tris.push(d[0])
+            states.push(state)
+            if (hasPaint) painted = true
+            next = restTo
+          }
+        }
+      }
+      i = find(b, TRIANGLE, next, to)
+    }
+    sections.push({
+      id: starts[s].id,
+      pos: pos.done(),
+      tris: tris.done(),
+      states: painted ? states.done() : null,
+    })
+  }
+  return sections
 }
