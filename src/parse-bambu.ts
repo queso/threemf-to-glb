@@ -60,7 +60,7 @@ export function parseBambuMetadataFromFiles(files: Record<string, Uint8Array>): 
     const hm = metadataMap(head)
     if (hm.extruder) extruderByObject[id] = Number(hm.extruder)
     partsByObject[id] = [
-      ...body.matchAll(/<part id="[^"]*" subtype="([^"]*)">([\s\S]*?)<\/part>/g),
+      ...body.matchAll(/<part id="[^"]*" subtype="([^"]*)"[^>]*>([\s\S]*?)<\/part>/g),
     ].map((pm) => {
       const meta = metadataMap(pm[2])
       return { subtype: pm[1], extruder: meta.extruder ? Number(meta.extruder) : null }
