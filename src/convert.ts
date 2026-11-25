@@ -483,7 +483,7 @@ const POW10 = Array.from({ length: 23 }, (_, k) => 10 ** k)
  * exactly-representable mantissa times or over one exact power of ten, a single correctly rounded
  * operation, as `Number()` is. Anything else goes through `Number()`.
  */
-function decimal(b: Uint8Array, from: number, to: number): number {
+export function decimal(b: Uint8Array, from: number, to: number): number {
   let i = from
   const negative = b[i] === 0x2d
   if (negative) i++
