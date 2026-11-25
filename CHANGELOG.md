@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.1](https://github.com/queso/threemf-to-glb/compare/v0.1.0...v0.1.1) (2026-11-25)
+
+
+### Fixes
+
+* **parse:** read &lt;part&gt; tags that carry a uuid attribute ([#2](https://github.com/queso/threemf-to-glb/issues/2)) ([4c21722](https://github.com/queso/threemf-to-glb/commit/4c21722af0a6acd427d6b15a3f14508cda2d5e0f))
+
 ## [0.1.0] - 2026-09-17
 
 ### Added
