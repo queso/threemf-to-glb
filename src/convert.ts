@@ -78,12 +78,17 @@ type GltfJson = {
  * thumbnails; inflating those too is what OOM-killed a 512Mi pod on a 58MB input in production.
  */
 /**
- * What the last conversion held, for this package's tests (not exported from the package): the
- * most object geometries held at once, and how many paint strings its paint cache saw.
+ * What the last conversion held and did, for this package's tests (not exported from the
+ * package): the most object geometries held at once, how many paint strings its paint cache saw,
+ * how many entries fell back to fflate, and how many bytes the paint search covered.
  */
 export const streamingStats = {
   mostGeometriesHeld: 0,
   paintStrings: 0,
+  /** Model files inflated by fflate because the reader did not read them. */
+  fallbackInflates: 0,
+  /** Bytes the paint search was given to scan, summed: at most the file's size when it is right. */
+  paintSearchBytes: 0,
   /** The entries inflated before any geometry is read. */
   upFront: [] as string[],
 }
@@ -91,12 +96,20 @@ export const streamingStats = {
 export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions = {}): Uint8Array {
   streamingStats.mostGeometriesHeld = 0
   streamingStats.paintStrings = 0
+  streamingStats.fallbackInflates = 0
+  streamingStats.paintSearchBytes = 0
   streamingStats.upFront = []
   const generator = options.generator ?? DEFAULT_GENERATOR
 
   // The root model and the two configs only. Each object geometry file is inflated when it is
   // first needed, parsed, and dropped before the next one (parseModelFile).
-  const files = unzipSelective(input, (name) => name === ROOT_MODEL || NEEDED_METADATA.has(name))
+  // The same pass lists every name fflate sees, so the fallback below inflates only entries that
+  // exist: one directory walk per conversion, not one per absent path.
+  const fflateNames = new Set<string>()
+  const files = unzipSelective(input, (name) => {
+    fflateNames.add(name)
+    return name === ROOT_MODEL || NEEDED_METADATA.has(name)
+  })
   streamingStats.upFront = Object.keys(files).sort()
   const meta = parseBambuMetadataFromFiles(files)
   const {
@@ -134,11 +147,14 @@ export function convertThreemfToGlb(input: Uint8Array, options: ConvertOptions =
     if (!key.endsWith(".model")) return
     // The reader answers null for anything it does not read exactly (a damaged header, another
     // compression, a size that does not match); fflate then decides, as it did before streaming:
-    // it inflates the entry or throws NotAZipError.
-    const bytes =
-      key === ROOT_MODEL
-        ? files[ROOT_MODEL]
-        : (zip?.read(key, scratch) ?? inflateOne(input, key) ?? undefined)
+    // it inflates the entry or throws NotAZipError. A name fflate does not list is absent, as
+    // inflating it would find.
+    const fallback = () => {
+      if (!fflateNames.has(key)) return undefined
+      streamingStats.fallbackInflates++
+      return inflateOne(input, key) ?? undefined
+    }
+    const bytes = key === ROOT_MODEL ? files[ROOT_MODEL] : (zip?.read(key, scratch) ?? fallback())
     if (!bytes) return
     for (const section of scanModel(bytes, paintState)) {
       if (section.tris.length) geomByRef.set(`${p}#${section.id}`, section)
@@ -509,6 +525,7 @@ function find(b: Uint8Array, pat: Uint8Array, from: number, to: number): number 
  * `indexOf` to the end of the file once per triangle.
  */
 function findWithin(b: Uint8Array, pat: Uint8Array, from: number, to: number): number {
+  if (to > from) streamingStats.paintSearchBytes += to - from
   const last = to - pat.length
   for (let i = from; i <= last; i++) {
     if (b[i] !== pat[0]) continue

@@ -91,22 +91,17 @@ describe("time: linear in the number of triangles", () => {
       { "3D/Objects/o.model": geometry([["1", tris]]) },
     )
   }
-  const best = (input: Uint8Array) => {
-    let ms = Number.POSITIVE_INFINITY
-    for (let k = 0; k < 3; k++) {
-      const t = performance.now()
+  // A count, not a time: each triangle's paint search covers only its own tag, so the bytes it is
+  // given add up to less than the file. Searching to the end of the file instead gives about
+  // n²/2 tags' worth; not searching within the tag at all gives none.
+  it("the paint search covers each triangle's own tag only: less than the file, in total", () => {
+    for (const n of [20_000, 80_000]) {
+      const input = unpainted(n)
+      const size = unzipSync(input)["3D/Objects/o.model"].length
       convertThreemfToGlb(input)
-      ms = Math.min(ms, performance.now() - t)
+      expect(streamingStats.paintSearchBytes).toBeGreaterThan(0)
+      expect(streamingStats.paintSearchBytes).toBeLessThan(size)
     }
-    return ms
-  }
-
-  it("four times the unpainted triangles take about four times as long, not sixteen", () => {
-    const small = unpainted(20_000)
-    const large = unpainted(80_000)
-    best(small) // warm up
-    const ratio = best(large) / best(small)
-    expect(ratio).toBeLessThan(8)
   })
 })
 
@@ -389,11 +384,71 @@ describe("scanModel: where the regexes it replaced went their own way", () => {
     expect([...sections[0].pos]).toEqual([1, 2, 3])
   })
 
+  it("17 and 19 digit triangle indices are the numbers Number() reads, not a digit sum", () => {
+    // Each sums to a different double from Number()'s, and to a different Uint32 too.
+    for (const v of ["31278707854909454", "7610749856721630309"]) {
+      const xml = `<object id="1"><mesh><vertices><vertex x="1" y="2" z="3"/></vertices><triangles><triangle v1="${v}" v2="0" v3="0"/></triangles></mesh></object>`
+      expect(scanModel(strToU8(xml))[0].tris[0]).toBe(Number(v) >>> 0)
+    }
+  })
+
+  it("a field the fast paths leave to Number() is decoded as UTF-8, as the whole file was", () => {
+    // A no-break space (UTF-8 C2 A0) is white space to Number(): 1.5, as v0.1.1 read it from the
+    // decoded file. Decoded as Latin-1 the field is "Â" and a no-break space: NaN.
+    for (const x of ["\u00a01.5", "1.5\u00a0", "\u20281.5"]) {
+      const xml = `<object id="1"><mesh><vertices><vertex x="${x}" y="2" z="3"/></vertices><triangles><triangle v1="0" v2="0" v3="0"/></triangles></mesh></object>`
+      expect(scanModel(strToU8(xml))[0].pos[0]).toBe(Number(x))
+    }
+  })
+
   it("a triangle index past 15 digits is the number Number() reads", () => {
     const xml = `<object id="1"><mesh><vertices><vertex x="1" y="2" z="3"/></vertices><triangles><triangle v1="99999999999999999999" v2="0" v3="0"/></triangles></mesh></object>`
     expect([...scanModel(strToU8(xml))[0].tris]).toEqual([
       ...Uint32Array.from([Number("99999999999999999999"), 0, 0]),
     ])
+  })
+})
+
+describe("absent model files: one directory walk, not one per path", () => {
+  // A count, not a time: the fallback to fflate runs only for names fflate lists, so absent
+  // paths cost nothing however many there are. One walk per absent path made 16,000 absent paths
+  // in a 16,000-entry archive take 42 s.
+  const many = (n: number) => {
+    const filler = Object.fromEntries(
+      Array.from({ length: n }, (_, i) => [`Metadata/filler-${i}.txt`, "x"]),
+    )
+    return project(
+      [
+        {
+          id: "2",
+          components: [
+            ["3D/Objects/o.model", "1"],
+            ...Array.from(
+              { length: n },
+              (_, i) => [`3D/Objects/absent-${i}.model`, "1"] as [string, string],
+            ),
+          ],
+        },
+      ],
+      {},
+      { "3D/Objects/o.model": geometry([["1", tri()]]), ...filler },
+    )
+  }
+
+  it("absent paths fall back to fflate never; a present file the reader refuses, once", () => {
+    const input = many(2_000)
+    const glb = convertThreemfToGlb(input)
+    expect(streamingStats.fallbackInflates).toBe(0)
+    expect(gltf(glb).nodes.filter((n) => n.mesh !== undefined)).toHaveLength(1)
+
+    // Without the reader, the one present model file falls back, and still only it.
+    const open = spyOn(ZipEntries, "open").mockReturnValue(null)
+    try {
+      expect(convertThreemfToGlb(input)).toEqual(glb)
+      expect(streamingStats.fallbackInflates).toBe(1)
+    } finally {
+      open.mockRestore()
+    }
   })
 })
 
