@@ -1,6 +1,6 @@
 {
   "name": "threemf-to-glb",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bake a Bambu Lab 3MF (geometry, paint_color RLE, plate layout) into a glTF binary (.glb): a pure library plus a CLI.",
   "type": "module",
   "main": "dist/index.js",
