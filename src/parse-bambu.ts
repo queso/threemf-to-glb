@@ -1,7 +1,12 @@
 import { MissingModelError, UnsupportedStructureError } from "./errors.js"
 import { readText, unzipSelective } from "./zip.js"
 
-export type PartInfo = { subtype: string; extruder: number | null }
+export type PartInfo = {
+  /** The part's id: the object id of the component it describes in the root model. */
+  id: string
+  subtype: string
+  extruder: number | null
+}
 export type ComponentRef = { path: string; objectId: string; transform: string | null }
 export type BuildItem = { objectId: string; transform: string | null }
 
@@ -60,10 +65,10 @@ export function parseBambuMetadataFromFiles(files: Record<string, Uint8Array>): 
     const hm = metadataMap(head)
     if (hm.extruder) extruderByObject[id] = Number(hm.extruder)
     partsByObject[id] = [
-      ...body.matchAll(/<part id="[^"]*" subtype="([^"]*)"[^>]*>([\s\S]*?)<\/part>/g),
+      ...body.matchAll(/<part id="([^"]*)" subtype="([^"]*)"[^>]*>([\s\S]*?)<\/part>/g),
     ].map((pm) => {
-      const meta = metadataMap(pm[2])
-      return { subtype: pm[1], extruder: meta.extruder ? Number(meta.extruder) : null }
+      const meta = metadataMap(pm[3])
+      return { id: pm[1], subtype: pm[2], extruder: meta.extruder ? Number(meta.extruder) : null }
     })
   }
   for (const pm of settingsXml.matchAll(/<plate>([\s\S]*?)<\/plate>/g)) {

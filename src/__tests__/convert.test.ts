@@ -3,6 +3,7 @@ import { convertThreemfToGlb } from "../convert.js"
 import { MissingModelError, NotAZipError, UnsupportedStructureError } from "../errors.js"
 import {
   buildMinimalFixture,
+  buildPartsOutOfOrderFixture,
   buildPartWithUuidFixture,
   buildTwoPlateFixture,
   notAZip,
@@ -132,6 +133,25 @@ describe("convertThreemfToGlb — parts with a uuid attribute", () => {
       .filter((n) => n.mesh !== undefined)
       .map((n) => json.meshes[n.mesh as number] as TestGltfMesh)
     expect(meshes.map(materialsOf)).toEqual([["filament_1", "filament_2"], ["negative"]])
+  })
+})
+
+describe("convertThreemfToGlb — parts paired with components by id", () => {
+  it("gives each component its own part's subtype when model_settings lists the parts in another order", () => {
+    const { json } = parseGlb(convertThreemfToGlb(buildPartsOutOfOrderFixture()))
+    const materialsOf = (mesh: TestGltfMesh) =>
+      mesh.primitives.map((p) => json.materials[p.material]?.name).sort()
+    const meshes = json.nodes
+      .filter((n) => n.mesh !== undefined)
+      .map((n) => json.meshes[n.mesh as number] as TestGltfMesh)
+    // Component order: the painted body (objectid 1), then the cutout (objectid 2).
+    expect(meshes.map(materialsOf)).toEqual([["filament_1", "filament_2"], ["negative"]])
+  })
+
+  it("the reordered fixture converts to the same GLB as the one in order", () => {
+    const inOrder = convertThreemfToGlb(buildPartWithUuidFixture())
+    const reordered = convertThreemfToGlb(buildPartsOutOfOrderFixture())
+    expect(Buffer.compare(Buffer.from(reordered), Buffer.from(inOrder))).toBe(0)
   })
 })
 

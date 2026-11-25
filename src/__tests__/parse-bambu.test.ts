@@ -36,8 +36,8 @@ describe("parseBambuMetadata", () => {
     // Bambu Studio writes `<part id="1" subtype="normal_part" uuid="...">`.
     const meta = parseBambuMetadata(buildPartWithUuidFixture())
     expect(meta.partsByObject["30"]).toEqual([
-      { subtype: "normal_part", extruder: null },
-      { subtype: "negative_part", extruder: null },
+      { id: "1", subtype: "normal_part", extruder: null },
+      { id: "2", subtype: "negative_part", extruder: null },
     ])
   })
 

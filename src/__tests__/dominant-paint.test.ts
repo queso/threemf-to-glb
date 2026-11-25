@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { dominantPaintState } from "../dominant-paint.js"
+import { cachedDominantPaintState, dominantPaintState } from "../dominant-paint.js"
 
 // Expected values were derived from the reference Python decoder (spike-toolkit's paint_rle.py)
 // run against real paint_color strings pulled from a real painted Bambu model:
@@ -32,12 +32,22 @@ describe("dominantPaintState — split-tree vectors (expected values from paint_
   })
 })
 
-describe("dominantPaintState — cache determinism", () => {
+describe("dominantPaintState — determinism, and the per-conversion cache", () => {
   it("returns the same value on repeated calls for the same hex string", () => {
     const first = dominantPaintState("1C41C1C3")
     const second = dominantPaintState("1C41C1C3")
     expect(second).toBe(first)
     expect(second).toBe(4)
+  })
+
+  it("a cache answers as dominantPaintState does, and each cache is its own", () => {
+    const a = cachedDominantPaintState()
+    const b = cachedDominantPaintState()
+    for (const hex of ["1C41C1C3", "4", "8", "1c", "not hex"]) {
+      expect(a(hex)).toBe(dominantPaintState(hex))
+      expect(a(hex)).toBe(dominantPaintState(hex))
+      expect(b(hex)).toBe(dominantPaintState(hex))
+    }
   })
 })
 
